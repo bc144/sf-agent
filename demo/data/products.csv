@@ -1,0 +1,5 @@
+product_id,title,brand,category,price,colors,sizes,in_stock,image_url,description
+SKU001,Slim Hoodie Black,Acme,hoodie,45.0,"black;navy","S;M;L",true,https://picsum.photos/seed/1/400,"Minimalist slim-fit cotton hoodie."
+SKU002,Boxy Hoodie Navy,Acme,hoodie,52.0,"navy;gray","M;L",true,https://picsum.photos/seed/2/400,"Boxy fit, soft fleece."
+SKU003,Running Shoes White,Volt,shoes,69.0,"white;black","8;9;10",true,https://picsum.photos/seed/3/400,"Breathable mesh running shoes."
+SKU004,Chino Pants Khaki,Acme,pants,39.0,"khaki","30;32;34",false,https://picsum.photos/seed/4/400,"Regular fit chinos."
