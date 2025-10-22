@@ -39,6 +39,18 @@ _client: QdrantClient = ensure_collection()
 _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
+@app.get("/")
+def root():
+    """Root endpoint"""
+    return {"status": "ok", "service": "Product Search API"}
+
+
+@app.get("/health")
+def health():
+    """Health check for Render"""
+    return {"status": "healthy"}
+
+
 def _build_filter(constraints: Constraints) -> rest.Filter:
     must: List[rest.FieldCondition] = []
 
