@@ -12,11 +12,29 @@ from qdrant_client.http import models as rest
 from sentence_transformers import SentenceTransformer
 
 try:  # pragma: no cover - import shim for script/module execution
-    from .models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse
+    from .models import (
+        AskRequest,
+        ChromeExtensionRequest,
+        Constraints,
+        ConversationalResponse,
+        ProductCard,
+        SearchRequest,
+        SearchResponse,
+    )
     from .qdrant_setup import COLLECTION_NAME, VECTOR_NAME, ensure_collection
+    from .langgraph_agents import run_agent_workflow
 except ImportError:  # pragma: no cover
-    from models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse  # type: ignore
+    from models import (  # type: ignore
+        AskRequest,
+        ChromeExtensionRequest,
+        Constraints,
+        ConversationalResponse,
+        ProductCard,
+        SearchRequest,
+        SearchResponse,
+    )
     from qdrant_setup import COLLECTION_NAME, VECTOR_NAME, ensure_collection  # type: ignore
+    from langgraph_agents import run_agent_workflow  # type: ignore
 
 # Load environment variables
 env_path = Path(__file__).parent.parent / ".env"
@@ -325,4 +343,37 @@ Response: {
         return ConversationalResponse(
             response="Here are some products I found for you!",
             items=items
+        )
+
+
+@app.post("/chrome-extension", response_model=ConversationalResponse)
+def chrome_extension_agent(request: ChromeExtensionRequest) -> ConversationalResponse:
+    """
+    Multi-agent orchestration endpoint for Chrome extension.
+    Uses LangGraph StateGraph to coordinate:
+    1. Router Agent (Intent Classification)
+    2. Creative Agent (Product Ideas for contextual queries)
+    3. RAG Agent (Vector Search)
+    4. Notification Tool (External notifications)
+    
+    Accepts search history and timestamp for enhanced context awareness.
+    """
+    try:
+        # Run the LangGraph multi-agent workflow
+        result = run_agent_workflow(
+            query=request.query,
+            previous_searches=request.previousSearches,
+            timestamp=request.timestamp
+        )
+        
+        return ConversationalResponse(
+            response=result["response"],
+            items=result["items"]
+        )
+        
+    except Exception as e:
+        print(f"Error in chrome_extension_agent: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Multi-agent workflow failed: {str(e)}"
         )
