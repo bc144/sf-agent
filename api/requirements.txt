@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
-qdrant-client
+qdrant-client==1.11.0
 pandas
 pydantic
 sentence-transformers
@@ -10,3 +10,5 @@ python-dotenv
 numpy<2.0
 openai
 gunicorn
+oci
+pydantic_ai

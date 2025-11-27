@@ -5,7 +5,7 @@ from typing import List, Optional
 import requests
 from dotenv import load_dotenv
 from pydantic import ValidationError
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from rich.console import Console
 from rich.table import Table
 
@@ -47,7 +47,7 @@ agent = Agent[None, List[ProductCard]](
 
 
 @agent.tool
-def search_products(query: str, constraints: Optional[Constraints] = None, k: int = 6) -> List[ProductCard]:
+def search_products(ctx: RunContext[None], query: str, constraints: Optional[Constraints] = None, k: int = 6) -> List[ProductCard]:
     """Search for products using the FastAPI endpoint and return the best matches."""
 
     items = _call_search_api(query=query, constraints=constraints, k=k)
