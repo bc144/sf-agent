@@ -1,10 +1,17 @@
 import json
 import os
+import sys
 from pathlib import Path
 from typing import List, Optional
 
+# Add parent directory to path to allow importing kapso
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from kapso.client import KapsoClient
+# from kapso.utils import normalize_kapso_webhook
+from kapso.use_kapso import use_kapso
+from agent.ask_agent import ask_agent_logic
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from qdrant_client import QdrantClient
@@ -12,10 +19,10 @@ from qdrant_client.http import models as rest
 from sentence_transformers import SentenceTransformer
 
 try:  # pragma: no cover - import shim for script/module execution
-    from .models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse
+    from .models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse, WhatsAppRequest
     from .qdrant_setup import COLLECTION_NAME, VECTOR_NAME, ensure_collection
 except ImportError:  # pragma: no cover
-    from models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse  # type: ignore
+    from models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse, WhatsAppRequest  # type: ignore
     from qdrant_setup import COLLECTION_NAME, VECTOR_NAME, ensure_collection  # type: ignore
 
 # Load environment variables
@@ -145,184 +152,56 @@ def ask_agent(request: AskRequest) -> ConversationalResponse:
     Conversational agent endpoint that understands natural language queries
     and provides personalized product recommendations.
     """
+    return ask_agent_logic(request)
+
+
+@app.post("/whatsapp", response_model=ConversationalResponse)
+async def whatsapp_agent(request: Request) -> ConversationalResponse:
+    """
+    Endpoint that receives a query, processes it using the agent logic,
+    sends the response via Kapso (WhatsApp), and returns the response.
+    """
+    webhook_data = await request.json()
     
-    # System prompt with guardrails
-    system_prompt = """You are a helpful shopping assistant for an e-commerce platform.
-
-IMPORTANT GUARDRAILS:
-1. ONLY recommend products from the available inventory
-2. NEVER give health, fitness, or lifestyle advice (like "lose weight", "exercise more", etc.)
-3. If someone mentions personal attributes (overweight, tall, short, etc.), ONLY suggest clothing/products that might fit or suit them
-4. Focus on product features: comfort, style, fit, size availability, color preferences
-5. Be supportive and positive about helping them find great products
-6. If asked about non-product topics, politely redirect to product recommendations
-
-Your task:
-1. Understand the user's needs from their query
-2. Extract search keywords and filters (category, price, color, size, etc.)
-3. Provide a friendly, helpful response
-4. You will be given search results to reference
-
-Output ONLY a valid JSON object with this structure:
-{
-    "search_query": "keywords to search products",
-    "filters": {
-        "category": "optional category like Clothing, Footwear, etc.",
-        "price_max": optional_number,
-        "color": "optional color",
-        "size": "optional size"
-    },
-    "conversational_response": "A warm, helpful response to the user (2-3 sentences max)"
-}
-
-Examples:
-User: "I'm overweight, what do you recommend?"
-Response: {
-    "search_query": "comfortable loose fit clothing",
-    "filters": {"category": "Clothing"},
-    "conversational_response": "I'd love to help you find comfortable and stylish clothing! Let me show you some great options with relaxed fits and comfortable fabrics that look amazing."
-}
-
-User: "I like black, what shoes do you have?"
-Response: {
-    "search_query": "black shoes",
-    "filters": {"color": "black", "category": "Footwear"},
-    "conversational_response": "Great choice! Black shoes are versatile and stylish. Here are some fantastic black footwear options for you."
-}"""
-
+    result = await use_kapso(webhook_data)
+    
+    # Verificar el resultado
+    if result.get("status") == "success":
+        return result
+    else:
+        return HTTPException(status_code=500, detail=result.get("message", "Error procesando webhook"))
+        
+    
+    
+    
+    # 1. Process the query using the shared ask_agent logic
+    ask_req = AskRequest(query=request.query)
+    agent_response = ask_agent_logic(ask_req)
+    
+    # 2. Send the response via Kapso
     try:
-        # Step 1: Use OpenAI to parse the query and generate intent
-        chat_response = _openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": request.query}
-            ],
-            temperature=0.7,
-            max_tokens=300
-        )
-        
-        agent_output = chat_response.choices[0].message.content
-        
-        # Parse the JSON response
-        try:
-            parsed = json.loads(agent_output)
-        except json.JSONDecodeError:
-            # Fallback if JSON parsing fails
-            parsed = {
-                "search_query": request.query,
-                "filters": {},
-                "conversational_response": "Let me find some great products for you!"
-            }
-        
-        search_query = parsed.get("search_query", request.query)
-        filters_dict = parsed.get("filters", {})
-        conversational_text = parsed.get("conversational_response", "Here are some products I think you'll love!")
-        
-        # Step 2: Build constraints from filters
-        constraints = Constraints(
-            category=filters_dict.get("category"),
-            price_max=filters_dict.get("price_max"),
-            price_min=filters_dict.get("price_min"),
-            color=filters_dict.get("color"),
-            size=filters_dict.get("size"),
-            brand=filters_dict.get("brand")
-        )
-        
-        # Step 3: Search for products
-        vector = _model.encode([search_query], normalize_embeddings=True)[0].tolist()
-        qdrant_filter = _build_filter(constraints)
-        
-        hits = _client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=(VECTOR_NAME, vector),
-            limit=6,  # Return up to 6 products
-            query_filter=qdrant_filter,
-        )
-        
-        # Step 4: Build product cards with AI-generated "why"
-        items: List[ProductCard] = []
-        product_summaries = []
-        
-        for hit in hits:
-            payload = hit.payload or {}
-            colors = payload.get("colors") or []
-            if isinstance(colors, str):
-                colors = [c.strip() for c in colors.split(";") if c.strip()]
-            sizes = payload.get("sizes") or []
-            if isinstance(sizes, str):
-                sizes = [s.strip() for s in sizes.split(";") if s.strip()]
-            price = float(payload.get("price", 0.0))
-            
-            product_summaries.append({
-                "title": payload.get("title", "Unknown Product"),
-                "price": price,
-                "category": payload.get("category"),
-                "colors": colors,
-                "sizes": sizes
-            })
-            
-            items.append(
-                ProductCard(
-                    product_id=payload.get("product_id", str(hit.id)),
-                    title=payload.get("title", "Unknown Product"),
-                    brand=payload.get("brand"),
-                    category=payload.get("category"),
-                    price=price,
-                    colors=colors,
-                    sizes=sizes,
-                    image_url=payload.get("image_url"),
-                    why=_build_why(payload, constraints, colors, sizes, price),
-                )
+        # Initialize Kapso client
+        with KapsoClient() as kapso:
+            # Send the conversational text response
+            kapso.send_message(
+                conversation_id=request.conversation_id,
+                message=agent_response.response
             )
-        
-        # Step 5: Enhance the response with product context if no products found
-        if not items:
-            conversational_text += " Unfortunately, I couldn't find products matching those exact criteria. Try browsing our catalog or adjusting your preferences!"
-        
-        return ConversationalResponse(
-            response=conversational_text,
-            items=items
-        )
-        
+            
+            # Send product details if available
+            if agent_response.items:
+                products_text = "Here are the products I found:\n\n"
+                for item in agent_response.items[:3]: # Limit to top 3
+                    products_text += f"*{item.title}*\n"
+                    products_text += f"Price: ${item.price}\n"
+                    products_text += f"Why: {item.why}\n\n"
+                
+                kapso.send_message(
+                    conversation_id=request.conversation_id,
+                    message=products_text
+                )
+                
     except Exception as e:
-        # Fallback to basic search if AI fails
-        vector = _model.encode([request.query], normalize_embeddings=True)[0].tolist()
-        hits = _client.search(
-            collection_name=COLLECTION_NAME,
-            query_vector=(VECTOR_NAME, vector),
-            limit=6,
-            query_filter=rest.Filter(must=[
-                rest.FieldCondition(key="in_stock", match=rest.MatchValue(value=True))
-            ]),
-        )
-        
-        items: List[ProductCard] = []
-        for hit in hits:
-            payload = hit.payload or {}
-            colors = payload.get("colors") or []
-            if isinstance(colors, str):
-                colors = [c.strip() for c in colors.split(";") if c.strip()]
-            sizes = payload.get("sizes") or []
-            if isinstance(sizes, str):
-                sizes = [s.strip() for s in sizes.split(";") if s.strip()]
-            price = float(payload.get("price", 0.0))
-            
-            items.append(
-                ProductCard(
-                    product_id=payload.get("product_id", str(hit.id)),
-                    title=payload.get("title", "Unknown Product"),
-                    brand=payload.get("brand"),
-                    category=payload.get("category"),
-                    price=price,
-                    colors=colors,
-                    sizes=sizes,
-                    image_url=payload.get("image_url"),
-                    why="Matches your search"
-                )
-            )
-        
-        return ConversationalResponse(
-            response="Here are some products I found for you!",
-            items=items
-        )
+        # We log the error but still return the response to the caller
+    
+    return agent_response

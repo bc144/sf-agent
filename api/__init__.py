@@ -1,1 +1,1 @@
-
+# Initialize the Qdrant client

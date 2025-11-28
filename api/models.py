@@ -42,3 +42,9 @@ class AskRequest(BaseModel):
 class ConversationalResponse(BaseModel):
     response: str
     items: List[ProductCard]
+
+
+class WhatsAppRequest(BaseModel):
+    query: str
+    conversation_id: str
+    phone_number: Optional[str] = None
