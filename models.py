@@ -35,8 +35,8 @@ class Context(BaseModel):
     Contexto simplificado para el agente
     El agente ahora lee archivos .md directamente cuando los necesita
     """
-    agent_name: str = "Sofia"
-    agency_name: str = "Rialtor AI"
+    agent_name: str = "Cedamoney"
+    agency_name: str = "Cedamanco"
     config: Optional[ConversationConfig] = None
     
     
