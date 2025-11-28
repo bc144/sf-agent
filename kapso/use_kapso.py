@@ -1,3 +1,10 @@
+from .utils import normalize_kapso_webhook, extract_message_ids_from_webhook, mark_whatsapp_messages_as_read_batch, mark_whatsapp_messages_as_read, disable_typing_indicator
+from .message_deduplicator import message_deduplicator
+import logging
+from models import User, ConversationConfig, UserMetadata
+
+logger = logging.getLogger(__name__)
+
 async def use_kapso(webhook_data: dict, agent: str = "sofia"):
     """
     Procesa webhooks de Kapso para manejar mensajes entrantes de WhatsApp
@@ -21,9 +28,9 @@ async def use_kapso(webhook_data: dict, agent: str = "sofia"):
         # Solo procesar mensajes entrantes con respuesta del agente
         if webhook_type == "whatsapp.message.received":
             # Normalizar webhook (soporta formato antiguo y nuevo)
-            normalized_data_list = normalize_kapso_webhook(webhook_data)
+            data_list = normalize_kapso_webhook(webhook_data)
             
-            if not normalized_data_list:
+            if not data_list:
                 logger.warning("⚠️ No se pudo normalizar el webhook o está vacío")
                 return {
                     "status": "success",
@@ -47,31 +54,13 @@ async def use_kapso(webhook_data: dict, agent: str = "sofia"):
                     "message_ids": message_ids
                 }
             
-            logger.info("✅ Mensaje NUEVO (no duplicado). Procesando con agente: %s", agent)
+            
             message_deduplicator.mark_messages_as_processed(message_ids)
             
-            adapter = select_agent(agent)
-            logger.info("🧩 Adapter seleccionado: %s", type(adapter).__name__)
-            
-            logger.info("📦 Datos normalizados a procesar: %d items", len(normalized_data_list))
-            
-            result = await handle_response_common(data_list=normalized_data_list, agent_adapter=adapter, is_demo=False)
-            logger.info("🏁 Resultado de handle_response_common: %s", result.get("status"))
+            result = await handle_response(data_list=data_list)
             
             return result
-        
-        
-        # Tipos de webhook desconocidos
-        else:
-            logger.warning("⚠️ Tipo de webhook no reconocido - revisar documentación de Kapso: %s", webhook_type)
-            
-            return {
-                "status": "success", 
-                "message": "Webhook no procesado",
-                "processed": False,
-                "agent_response": False,
-                "note": "Tipo de webhook no reconocido - revisar documentación de Kapso"
-            }
+
 
     except Exception as e:
         logger.error("❌ Error procesando webhook de Kapso: %s: %s", type(e).__name__, str(e))
@@ -79,3 +68,102 @@ async def use_kapso(webhook_data: dict, agent: str = "sofia"):
         logger.error("❌ Traceback: %s", traceback.format_exc())
         return {"status": "error", "message": "Error interno del servidor"}
 
+async def handle_response(data_list: list) -> dict:
+    """
+    Maneja la respuesta del agente
+    """
+    first_data = data_list[0]
+    conversation = first_data.get("conversation", {})
+    reached_from_phone_number = first_data.get("whatsapp_config", {}).get("display_phone_number_normalized")
+    
+    if (reached_from_phone_number is None) and (os.getenv("ENVIRONMENT") in ("staging", "local")):
+        reached_from_phone_number = "56920403095"
+        logger.info("📞 Usando número default para staging/local: %s", reached_from_phone_number)
+    phone_number = conversation.get("phone_number", None)
+    whatsapp_conversation_id = conversation.get("id", None)
+    contact_name = conversation.get("contact_name", "Usuario")
+    whatsapp_config_id = conversation.get("whatsapp_config_id")
+    whatsapp_config_id = conversation.get("whatsapp_config_id")
+    if not whatsapp_config_id:
+        # Intentar usar phone_number_id como fallback si parser lo extrajo
+        whatsapp_config_id = first_data.get("phone_number_id")
+            
+    if not whatsapp_config_id:
+        logger.warning("⚠️ whatsapp_config_id es None. Usando 'UNKNOWN_CONFIG'")
+        whatsapp_config_id = "UNKNOWN_CONFIG"
+    
+
+    # Combinar mensajes
+    combined_message_parts = []
+    message_ids = []
+    logger.info("📨 Procesando data_list con %d elemento(s)", len(data_list))
+    
+    for i, data in enumerate(data_list, 1):
+        
+        
+        message_data = data.get("message", {})
+        
+        msg_id = message_data.get("id", None)
+        message_ids.append(msg_id)
+        
+        message_type = message_data.get("message_type", "").lower()
+        message_content_raw = message_data.get("content", "")
+        message_content = message_content_raw.strip() if message_content_raw else ""
+        
+        
+        if message_type in ("reaction", "sticker", "image"):
+            logger.info("⏭️ Omitiendo mensaje %d: tipo '%s' está en lista de filtros", i, message_type)
+            continue
+        
+        if message_content:
+            combined_message_parts.append(f"[Mensaje {i}]: {message_content}")
+            logger.info("✅ Mensaje %d agregado a combined_message_parts", i)
+        else:
+            logger.warning("⚠️ Mensaje %d NO agregado: contenido vacío después de strip (tipo: '%s')", i, message_type)
+
+    processed_messages_count = len(combined_message_parts)
+    
+    if not combined_message_parts:
+        return {"status": "success", "message": "Mensajes sin contenido omitidos"}
+    
+    combined_message = (f"El cliente envió {processed_messages_count} mensajes:\n\n" + "\n\n".join(combined_message_parts)) if processed_messages_count > 1 else combined_message_parts[0]
+    
+    try:
+        await mark_whatsapp_messages_as_read_batch(message_ids, enable_typing_on_last=True, background_processing=False)
+    except Exception as e:
+        logger.error("❌ Error marcando mensajes como leídos: %s", e)
+        
+    user = User(
+            name=contact_name,
+            phone_number=phone_number,
+            conversation_id=whatsapp_conversation_id,
+            metadata=UserMetadata(whatsapp_config_id=whatsapp_config_id, reached_from_phone_number=reached_from_phone_number)
+        )
+    config = ConversationConfig(
+        reached_from_phone_number=reached_from_phone_number,
+        whatsapp_conversation_id=whatsapp_conversation_id,
+        whatsapp_config_id=whatsapp_config_id,
+        phone_number=phone_number,
+        contact_name=contact_name,
+        is_new_conversation=first_data.get("is_new_conversation", False),
+    )
+    
+    conversation_history = None
+    if is_demo:
+        try:
+            if whatsapp_conversation_id:
+                context = await get_context_with_history(user, message_limit=20, is_testing=config.is_testing if hasattr(config, 'is_testing') else False)
+                conversation_history = context.conversation_history
+                logger.info("📚 Historial cargado para modo demo: %d mensajes", len(conversation_history) if conversation_history else 0)
+        except Exception as e:
+            logger.warning("⚠️ No se pudo cargar historial para contexto: %s", e)
+
+
+    
+        
+
+    return {
+        "status": "success",
+        "message": "Respuesta del agente",
+        "data": data_list
+    }

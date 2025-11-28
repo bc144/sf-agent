@@ -13,15 +13,7 @@ from api.models import AskRequest, Constraints, ConversationalResponse, ProductC
 from api.qdrant_setup import COLLECTION_NAME, VECTOR_NAME, ensure_collection
 
 
-# Assuming clients are initialized here or passed in. 
-# For a shared module, it's often better to initialize clients once or dependency inject them.
-# To keep it simple and matching current structure, we'll re-initialize if not provided, 
-# or rely on module-level globals if that's the pattern.
-# However, re-initializing heavy models (SentenceTransformer) in every file is bad practice.
-# Let's assume we want to move the logic but keep the heavy lifting objects shared or instantiated efficiently.
 
-# For now, I will replicate the initialization to ensure it works standalone, 
-# but in a real app, you'd likely pass these clients to the function.
 _model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 _client: QdrantClient = ensure_collection()
 _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))

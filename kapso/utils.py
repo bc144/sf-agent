@@ -1,7 +1,19 @@
-from typing import Dict, Any, List
+"""
+Parser y normalizador de webhooks de Kapso.
+
+Este módulo maneja diferentes formatos de webhooks de Kapso y los normaliza
+a una estructura común para su procesamiento.
+"""
+import aiohttp
+import asyncio
 import logging
+import os
+from typing import List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor
+
 
 logger = logging.getLogger(__name__)
+
 
 def normalize_kapso_webhook(webhook_data: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -115,3 +127,299 @@ def normalize_kapso_webhook(webhook_data: Dict[str, Any]) -> List[Dict[str, Any]
     
     logger.info("✅ Webhook normalizado: %d mensaje(s) procesado(s)", len(normalized_list))
     return normalized_list
+
+
+def extract_message_ids_from_webhook(webhook_data: Dict[str, Any]) -> List[str]:
+    """
+    Extrae los IDs de mensajes del webhook (soporta ambos formatos).
+    
+    Args:
+        webhook_data: Datos del webhook de Kapso
+        
+    Returns:
+        Lista de IDs de mensajes
+    """
+    message_ids = []
+    data_list = webhook_data.get("data", [])
+    
+    for item in data_list:
+        message_data = item.get("message", {})
+        if isinstance(message_data, dict):
+            msg_id = message_data.get("id")
+            if msg_id:
+                message_ids.append(msg_id)
+    
+    return message_ids
+
+
+# Thread pool para procesamiento en background
+_thread_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="kapso_read_marker")
+
+async def mark_whatsapp_message_as_read_single(
+    message_id: str, 
+    typing_indicator: bool = True
+) -> Dict[str, Any]:
+    """
+    Marca un mensaje individual de WhatsApp como leído usando la API de Kapso
+    
+    Args:
+        message_id (str): ID del mensaje a marcar como leído
+        typing_indicator (bool): Si mostrar el indicador de typing (default: False)
+        
+    Returns:
+        Dict[str, Any]: Resultado de la operación
+    """
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": os.getenv('KAPSO_API_KEY'),
+        }
+        
+        url = f"{os.getenv('KAPSO_BASE_URL')}/whatsapp_messages/{message_id}/mark_as_read"
+        
+        # Agregar typing_indicator como query parameter si se especifica
+        params = {}
+        if typing_indicator is not None:
+            params['typing_indicator'] = str(typing_indicator).lower()
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=headers, params=params, timeout=10) as response:
+                response_data = await response.json()
+                
+                if response.status == 200:
+                    logger.debug("✅ Mensaje %s marcado como leído exitosamente", message_id)
+                    return {
+                        "success": True,
+                        "message_id": message_id,
+                        "status_code": response.status,
+                        "data": response_data
+                    }
+                else:
+                    logger.warning("⚠️ Error marcando mensaje %s como leído: %s", message_id, response.status)
+                    logger.debug("   Respuesta: %s", response_data)
+                    return {
+                        "success": False,
+                        "message_id": message_id,
+                        "status_code": response.status,
+                        "error": response_data,
+                        "message": f"Error de API de Kapso: {response.status}"
+                    }
+                    
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ Timeout marcando mensaje %s como leído", message_id)
+        return {
+            "success": False,
+            "message_id": message_id,
+            "error": "timeout",
+            "message": "Timeout al marcar mensaje como leído"
+        }
+    except Exception as e:
+        logger.error("❌ Error marcando mensaje %s como leído: %s", message_id, e)
+        return {
+            "success": False,
+            "message_id": message_id,
+            "error": str(e),
+            "message": "Error interno marcando mensaje como leído"
+        }
+
+async def mark_whatsapp_messages_as_read_batch(
+    message_ids: List[str], 
+    enable_typing_on_last: bool = True,
+    background_processing: bool = True
+) -> Dict[str, Any]:
+    """
+    Marca múltiples mensajes de WhatsApp como leídos
+    
+    Args:
+        message_ids (List[str]): Lista de IDs de mensajes a marcar como leídos
+        enable_typing_on_last (bool): Si activar typing indicator en el último mensaje
+        background_processing (bool): Si procesar en background para mayor velocidad
+        
+    Returns:
+        Dict[str, Any]: Resultado consolidado de la operación
+    """
+    if not message_ids:
+        return {
+            "success": True,
+            "message": "No hay mensajes para marcar como leídos",
+            "results": []
+        }
+    
+    # Filtrar IDs válidos
+    valid_message_ids = [msg_id for msg_id in message_ids if msg_id and msg_id.strip()]
+    
+    if not valid_message_ids:
+        logger.warning("⚠️ Todos los message_ids están vacíos o son inválidos")
+        return {
+            "success": False,
+            "message": "Todos los message_ids son inválidos",
+            "results": []
+        }
+    
+    logger.info("📖 Marcando %d mensajes como leídos (background: %s)", len(valid_message_ids), background_processing)
+    
+    try:
+        if background_processing:
+            # Procesamiento en background - no esperamos los resultados
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(
+                _thread_pool,
+                lambda: asyncio.run(_mark_messages_background(valid_message_ids, enable_typing_on_last))
+            )
+            
+            return {
+                "success": True,
+                "message": f"Procesando {len(valid_message_ids)} mensajes en background",
+                "message_count": len(valid_message_ids),
+                "background": True,
+                "typing_enabled_on_last": enable_typing_on_last
+            }
+        else:
+            # Procesamiento síncrono - esperamos resultados
+            results = await _mark_messages_foreground(valid_message_ids, enable_typing_on_last)
+            
+            success_count = sum(1 for r in results if r.get("success"))
+            
+            return {
+                "success": success_count > 0,
+                "message": f"Marcados {success_count}/{len(valid_message_ids)} mensajes como leídos",
+                "message_count": len(valid_message_ids),
+                "success_count": success_count,
+                "background": False,
+                "results": results
+            }
+            
+    except Exception as e:
+        logger.error("❌ Error en batch marking: %s", e)
+        return {
+            "success": False,
+            "message": f"Error procesando mensajes: {str(e)}",
+            "message_count": len(valid_message_ids)
+        }
+
+async def _mark_messages_background(message_ids: List[str], enable_typing_on_last: bool):
+    """Función helper para procesar mensajes en background"""
+    try:
+        results = await _mark_messages_foreground(message_ids, enable_typing_on_last)
+        success_count = sum(1 for r in results if r.get("success"))
+        logger.info("🔄 Background processing completado: %d/%d mensajes marcados", success_count, len(message_ids))
+    except Exception as e:
+        logger.error("❌ Error en background processing: %s", e)
+
+async def _mark_messages_foreground(message_ids: List[str], enable_typing_on_last: bool) -> List[Dict[str, Any]]:
+    """Función helper para procesar mensajes en foreground"""
+    tasks = []
+    
+    # Crear tareas para todos los mensajes
+    for i, message_id in enumerate(message_ids):
+        # Solo el último mensaje debe tener typing indicator si está habilitado
+        is_last_message = (i == len(message_ids) - 1)
+        typing_indicator = enable_typing_on_last and is_last_message
+        
+        task = mark_whatsapp_message_as_read_single(message_id, typing_indicator)
+        tasks.append(task)
+    
+    # Ejecutar todas las tareas en paralelo
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Procesar resultados y manejar excepciones
+    processed_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            processed_results.append({
+                "success": False,
+                "message_id": message_ids[i],
+                "error": str(result),
+                "message": "Excepción durante el procesamiento"
+            })
+        else:
+            processed_results.append(result)
+    
+    return processed_results
+
+async def disable_typing_indicator(conversation_id: str) -> Dict[str, Any]:
+    """
+    Desactiva el typing indicator para una conversación
+    
+    Args:
+        conversation_id (str): ID de la conversación
+        
+    Returns:
+        Dict[str, Any]: Resultado de la operación
+    """
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": os.getenv('KAPSO_API_KEY'),
+        }
+        
+        # Endpoint para desactivar typing (basado en patrones comunes de APIs de WhatsApp)
+        url = f"{os.getenv('KAPSO_BASE_URL')}/whatsapp_conversations/{conversation_id}/typing"
+        
+        # Payload para desactivar typing
+        data = {
+            "typing": False
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=headers, json=data, timeout=5) as response:
+                if response.status in [200, 204]:
+                    logger.debug("✅ Typing indicator desactivado para conversación %s", conversation_id)
+                    return {
+                        "success": True,
+                        "conversation_id": conversation_id,
+                        "message": "Typing indicator desactivado"
+                    }
+                else:
+                    # Si el endpoint no existe o falla, no es crítico
+                    logger.debug("⚠️ No se pudo desactivar typing indicator: %s", response.status)
+                    return {
+                        "success": False,
+                        "conversation_id": conversation_id,
+                        "message": "Endpoint de typing no disponible o falló",
+                        "status_code": response.status
+                    }
+                    
+    except Exception as e:
+        logger.debug("⚠️ Error desactivando typing indicator: %s", e)
+        return {
+            "success": False,
+            "conversation_id": conversation_id,
+            "error": str(e),
+            "message": "Error desactivando typing indicator"
+        }
+
+# Función de conveniencia para mantener compatibilidad
+def mark_whatsapp_messages_as_read(message_ids: List[str]):
+    """
+    Función de conveniencia para marcar mensajes como leídos (mantiene compatibilidad)
+    Procesa en background por defecto para no bloquear el flujo principal
+    
+    Args:
+        message_ids (List[str]): Lista de IDs de mensajes
+    """
+    if not message_ids:
+        return
+    
+    # Ejecutar en background de forma fire-and-forget
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Si ya hay un loop corriendo, usar run_in_executor
+            loop.run_in_executor(
+                _thread_pool,
+                lambda: asyncio.run(mark_whatsapp_messages_as_read_batch(
+                    message_ids, 
+                    enable_typing_on_last=True, 
+                    background_processing=True
+                ))
+            )
+        else:
+            # Si no hay loop, crear uno nuevo
+            asyncio.run(mark_whatsapp_messages_as_read_batch(
+                message_ids, 
+                enable_typing_on_last=True, 
+                background_processing=True
+            ))
+    except Exception as e:
+        logger.error("❌ Error iniciando background marking: %s", e)
