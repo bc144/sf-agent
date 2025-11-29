@@ -83,6 +83,28 @@ class KapsoClient:
         
         return result
 
+    def mark_as_read(self, message_id: str, typing_indicator: bool = False) -> Dict[str, Any]:
+        """Mark a WhatsApp message as read.
+        
+        Args:
+            message_id: The ID of the message to mark as read
+            typing_indicator: Whether to show typing indicator after marking as read
+            
+        Returns:
+            Response from the API
+        """
+        url = f"/whatsapp_messages/{message_id}/mark_as_read"
+        params = {}
+        if typing_indicator:
+            params['typing_indicator'] = str(typing_indicator).lower()
+            
+        response = self._client.patch(url, params=params)
+        # We don't raise for status here to match existing logic of handling errors gracefully
+        # but ideally we should. For now let's return json or empty dict on error.
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"Failed with status {response.status_code}", "status_code": response.status_code}
+
     def send_template_by_id(
         self,
         template_id: str,
@@ -157,6 +179,17 @@ class KapsoClient:
         result = response.json()
         
         return result
+
+    def disable_typing_indicator(self, conversation_id: str) -> Dict[str, Any]:
+        """Disable typing indicator for a conversation."""
+        url = f"/whatsapp_conversations/{conversation_id}/typing"
+        data = {"typing": False}
+        response = self._client.patch(url, json=data)
+        
+        if response.status_code in [200, 204]:
+            return {"success": True}
+        return {"success": False, "status_code": response.status_code}
+
     def send_message(self, conversation_id: str, message: str) -> Dict[str, Any]:
         """Send a text message to a specific conversation.
         
@@ -190,4 +223,3 @@ class KapsoClient:
 
 
 __all__ = ["KapsoClient"]
-

@@ -27,7 +27,7 @@ class ConversationConfig(BaseModel):
 class ConversationMessage(BaseModel):
     """Represents a message in the conversation history"""
     timestamp: str
-    sender: str  # 'client' or 'sofia'
+    sender: str  # 'client' or 'cedamoney'
     message: str
     message_id: Optional[str] = None
 class Context(BaseModel):
