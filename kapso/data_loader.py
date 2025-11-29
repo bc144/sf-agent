@@ -86,7 +86,7 @@ def get_conversation_history_kapso(user: User, message_limit: int, is_testing: b
                 try:
                     # Extraer información del mensaje
                     direction = msg.get("direction", "")
-                    sender = "client" if direction == "inbound" else "sofia"
+                    sender = "client" if direction == "inbound" else "cedamoney"
                     text = msg.get("content", "")
                     
                     # Si no hay contenido en content, intentar obtenerlo de message_type_data
@@ -131,7 +131,7 @@ def _generate_message_description(msg: dict, text: str, message_type: str, sende
     elif message_type == "image":
         caption = msg.get("caption", "")
         filename = msg.get("filename", "imagen")
-        if sender == "sofia":
+        if sender == "cedamoney":
             return f"[Envío imagen: {caption or filename}]", f"Imagen enviada: {caption or filename}"
         else:
             return f"[Cliente envió una imagen{f': {caption}' if caption else ''}]", f"Imagen recibida del cliente"
