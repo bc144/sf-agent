@@ -158,7 +158,7 @@ def ask_agent(request: AskRequest) -> ConversationalResponse:
 @app.post("/whatsapp", response_model=ConversationalResponse)
 async def whatsapp_agent(request: Request) -> ConversationalResponse:
     """
-    Endpoint that receives a query, processes it using the agent logic,
+    Endpoint that receives a query via webhook, processes it using the agent logic,
     sends the response via Kapso (WhatsApp), and returns the response.
     """
     webhook_data = await request.json()
@@ -167,41 +167,12 @@ async def whatsapp_agent(request: Request) -> ConversationalResponse:
     
     # Verificar el resultado
     if result.get("status") == "success":
-        return result
+        # Retornar una respuesta dummy válida para el modelo ConversationalResponse
+        # ya que la respuesta real se envió por WhatsApp dentro de use_kapso
+        return ConversationalResponse(
+            response="Webhook processed successfully",
+            items=[]
+        )
     else:
         return HTTPException(status_code=500, detail=result.get("message", "Error procesando webhook"))
-        
-    
-    
-    
-    # 1. Process the query using the shared ask_agent logic
-    ask_req = AskRequest(query=request.query)
-    agent_response = ask_agent_logic(ask_req)
-    
-    # 2. Send the response via Kapso
-    try:
-        # Initialize Kapso client
-        with KapsoClient() as kapso:
-            # Send the conversational text response
-            kapso.send_message(
-                conversation_id=request.conversation_id,
-                message=agent_response.response
-            )
-            
-            # Send product details if available
-            if agent_response.items:
-                products_text = "Here are the products I found:\n\n"
-                for item in agent_response.items[:3]: # Limit to top 3
-                    products_text += f"*{item.title}*\n"
-                    products_text += f"Price: ${item.price}\n"
-                    products_text += f"Why: {item.why}\n\n"
-                
-                kapso.send_message(
-                    conversation_id=request.conversation_id,
-                    message=products_text
-                )
-                
-    except Exception as e:
-        # We log the error but still return the response to the caller
-    
-    return agent_response
+

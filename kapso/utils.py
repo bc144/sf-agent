@@ -4,13 +4,11 @@ Parser y normalizador de webhooks de Kapso.
 Este módulo maneja diferentes formatos de webhooks de Kapso y los normaliza
 a una estructura común para su procesamiento.
 """
-import aiohttp
+
 import asyncio
 import logging
-import os
 from typing import List, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
-
 
 logger = logging.getLogger(__name__)
 
@@ -155,64 +153,44 @@ def extract_message_ids_from_webhook(webhook_data: Dict[str, Any]) -> List[str]:
 # Thread pool para procesamiento en background
 _thread_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="kapso_read_marker")
 
+from .client import KapsoClient
+
 async def mark_whatsapp_message_as_read_single(
     message_id: str, 
     typing_indicator: bool = True
 ) -> Dict[str, Any]:
     """
     Marca un mensaje individual de WhatsApp como leído usando la API de Kapso
-    
-    Args:
-        message_id (str): ID del mensaje a marcar como leído
-        typing_indicator (bool): Si mostrar el indicador de typing (default: False)
-        
-    Returns:
-        Dict[str, Any]: Resultado de la operación
     """
     try:
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Key": os.getenv('KAPSO_API_KEY'),
-        }
+        # Usar KapsoClient de forma síncrona en un ejecutor para no bloquear el loop
+        # Ya que KapsoClient actual es síncrono (usa httpx.Client, no httpx.AsyncClient)
+        loop = asyncio.get_event_loop()
         
-        url = f"{os.getenv('KAPSO_BASE_URL')}/whatsapp_messages/{message_id}/mark_as_read"
+        def _sync_mark():
+            with KapsoClient() as client:
+                return client.mark_as_read(message_id, typing_indicator)
         
-        # Agregar typing_indicator como query parameter si se especifica
-        params = {}
-        if typing_indicator is not None:
-            params['typing_indicator'] = str(typing_indicator).lower()
+        response_data = await loop.run_in_executor(_thread_pool, _sync_mark)
         
-        async with aiohttp.ClientSession() as session:
-            async with session.patch(url, headers=headers, params=params, timeout=10) as response:
-                response_data = await response.json()
-                
-                if response.status == 200:
-                    logger.debug("✅ Mensaje %s marcado como leído exitosamente", message_id)
-                    return {
-                        "success": True,
-                        "message_id": message_id,
-                        "status_code": response.status,
-                        "data": response_data
-                    }
-                else:
-                    logger.warning("⚠️ Error marcando mensaje %s como leído: %s", message_id, response.status)
-                    logger.debug("   Respuesta: %s", response_data)
-                    return {
-                        "success": False,
-                        "message_id": message_id,
-                        "status_code": response.status,
-                        "error": response_data,
-                        "message": f"Error de API de Kapso: {response.status}"
-                    }
+        if "error" not in response_data:
+            logger.debug("✅ Mensaje %s marcado como leído exitosamente", message_id)
+            return {
+                "success": True,
+                "message_id": message_id,
+                "status_code": 200,
+                "data": response_data
+            }
+        else:
+            logger.warning("⚠️ Error marcando mensaje %s como leído: %s", message_id, response_data.get("status_code"))
+            return {
+                "success": False,
+                "message_id": message_id,
+                "status_code": response_data.get("status_code"),
+                "error": response_data,
+                "message": f"Error de API de Kapso"
+            }
                     
-    except asyncio.TimeoutError:
-        logger.warning("⚠️ Timeout marcando mensaje %s como leído", message_id)
-        return {
-            "success": False,
-            "message_id": message_id,
-            "error": "timeout",
-            "message": "Timeout al marcar mensaje como leído"
-        }
     except Exception as e:
         logger.error("❌ Error marcando mensaje %s como leído: %s", message_id, e)
         return {
@@ -339,46 +317,33 @@ async def _mark_messages_foreground(message_ids: List[str], enable_typing_on_las
 
 async def disable_typing_indicator(conversation_id: str) -> Dict[str, Any]:
     """
-    Desactiva el typing indicator para una conversación
-    
-    Args:
-        conversation_id (str): ID de la conversación
-        
-    Returns:
-        Dict[str, Any]: Resultado de la operación
+    Desactiva el typing indicator para una conversación usando KapsoClient
     """
     try:
-        headers = {
-            "Content-Type": "application/json",
-            "X-API-Key": os.getenv('KAPSO_API_KEY'),
-        }
+        # Usar KapsoClient de forma síncrona en un ejecutor
+        loop = asyncio.get_event_loop()
         
-        # Endpoint para desactivar typing (basado en patrones comunes de APIs de WhatsApp)
-        url = f"{os.getenv('KAPSO_BASE_URL')}/whatsapp_conversations/{conversation_id}/typing"
+        def _sync_disable_typing():
+            with KapsoClient() as client:
+                return client.disable_typing_indicator(conversation_id)
+
+        response_data = await loop.run_in_executor(_thread_pool, _sync_disable_typing)
         
-        # Payload para desactivar typing
-        data = {
-            "typing": False
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.patch(url, headers=headers, json=data, timeout=5) as response:
-                if response.status in [200, 204]:
-                    logger.debug("✅ Typing indicator desactivado para conversación %s", conversation_id)
-                    return {
-                        "success": True,
-                        "conversation_id": conversation_id,
-                        "message": "Typing indicator desactivado"
-                    }
-                else:
-                    # Si el endpoint no existe o falla, no es crítico
-                    logger.debug("⚠️ No se pudo desactivar typing indicator: %s", response.status)
-                    return {
-                        "success": False,
-                        "conversation_id": conversation_id,
-                        "message": "Endpoint de typing no disponible o falló",
-                        "status_code": response.status
-                    }
+        if response_data.get("success"):
+            logger.debug("✅ Typing indicator desactivado para conversación %s", conversation_id)
+            return {
+                "success": True,
+                "conversation_id": conversation_id,
+                "message": "Typing indicator desactivado"
+            }
+        else:
+            logger.debug("⚠️ No se pudo desactivar typing indicator: %s", response_data.get("status_code"))
+            return {
+                "success": False,
+                "conversation_id": conversation_id,
+                "message": "Endpoint de typing no disponible o falló",
+                "status_code": response_data.get("status_code")
+            }
                     
     except Exception as e:
         logger.debug("⚠️ Error desactivando typing indicator: %s", e)
