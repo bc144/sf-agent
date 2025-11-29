@@ -48,3 +48,32 @@ class WhatsAppRequest(BaseModel):
     query: str
     conversation_id: str
     phone_number: Optional[str] = None
+
+class CartItem(BaseModel):
+    product_id: str
+    title: str
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    price: float
+    quantity: int = 1
+    color: Optional[str] = None
+    size: Optional[str] = None
+    image_url: Optional[str] = None
+
+# Agregar este modelo en models.py o al inicio
+class CheckoutRequest(BaseModel):
+    cart: List[Dict[str, Any]]
+    customer_name: str  # Nombre de WhatsApp
+    customer_phone: str  # Número de teléfono
+
+class Order(BaseModel):
+    order_id: str
+    session_id: str
+    customer_name: str
+    customer_phone: str
+    cart: List[CartItem]
+    amount_total: float
+    currency: str
+    status: str
+    payment_status: str
+    created_at: str

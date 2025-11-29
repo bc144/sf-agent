@@ -13,10 +13,12 @@ from agent.ask_agent import ask_agent_logic
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
 from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 from sentence_transformers import SentenceTransformer
+import stripe
 
 try:  # pragma: no cover - import shim for script/module execution
     from .models import AskRequest, Constraints, ConversationalResponse, ProductCard, SearchRequest, SearchResponse, WhatsAppRequest
@@ -29,6 +31,8 @@ except ImportError:  # pragma: no cover
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
+# Initialize Stripe
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 
 app = FastAPI(title="Product Search API", version="1.0.0")
 
@@ -155,6 +159,232 @@ def ask_agent(request: AskRequest) -> ConversationalResponse:
     return ask_agent_logic(request)
 
 
+# ============= STRIPE ROUTES =============
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(request: Request):
+    """
+    Crea una sesión de pago de Stripe para pago único.
+    Espera: { 
+        "cart": [
+            {
+                "product_id": "id1",
+                "quantity": 1,
+                "color": "red",
+                "size": "M"
+            }
+        ],
+        "customer_name": "Juan Pérez",
+        "customer_phone": "+52 123 456 7890"
+    }
+    """
+    try:
+        data = await request.json()
+        cart = data.get("cart", [])
+        customer_name = data.get("customer_name")
+        customer_phone = data.get("customer_phone")
+        
+        if not cart:
+            raise HTTPException(status_code=400, detail="Cart is empty")
+        
+        if not customer_name or not customer_phone:
+            raise HTTPException(status_code=400, detail="Customer name and phone are required")
+        
+        # Construir line_items y metadata
+        line_items = []
+        product_ids = []
+        
+        for item in cart:
+            product_id = item.get("product_id")
+            quantity = item.get("quantity", 1)
+            
+            if not product_id:
+                continue
+                
+            product_ids.append(product_id)
+            
+            # Buscar el producto en Qdrant
+            results = _client.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=rest.Filter(
+                    must=[
+                        rest.FieldCondition(
+                            key="product_id",
+                            match=rest.MatchValue(value=product_id)
+                        )
+                    ]
+                ),
+                limit=1
+            )
+            
+            if results[0]:
+                product = results[0][0].payload
+                
+                # Descripción con color y talla si están disponibles
+                description_parts = [product.get("category", "")]
+                if item.get("color"):
+                    description_parts.append(f"Color: {item['color']}")
+                if item.get("size"):
+                    description_parts.append(f"Size: {item['size']}")
+                
+                line_items.append({
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {
+                            "name": product.get("title", "Product"),
+                            "description": " | ".join(filter(None, description_parts)),
+                            "images": [product.get("image_url")] if product.get("image_url") else [],
+                        },
+                        "unit_amount": int(float(product.get("price", 0)) * 100),
+                    },
+                    "quantity": quantity,
+                })
+        
+        if not line_items:
+            raise HTTPException(status_code=404, detail="No valid products found")
+        
+        # Crear sesión de Stripe
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=line_items,
+            mode="payment",
+            success_url=f"{os.getenv('DOMAIN', 'http://localhost:8000')}/success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{os.getenv('DOMAIN', 'http://localhost:8000')}/cancel",
+            metadata={
+                "product_ids": ",".join(product_ids),
+                "cart_json": json.dumps(cart),
+                "customer_name": customer_name,
+                "customer_phone": customer_phone
+            }
+        )
+        
+        return JSONResponse({
+            "checkout_url": checkout_session.url,
+            "session_id": checkout_session.id
+        })
+        
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+
+@app.get("/payment-success")
+async def payment_success(session_id: str):
+    """
+    Procesa el pago exitoso después de que Stripe redirija aquí.
+    Guarda la orden con el carrito completo y datos del cliente de WhatsApp.
+    """
+    try:
+        # Recuperar la sesión de Stripe
+        session = stripe.checkout.Session.retrieve(
+            session_id,
+            expand=['line_items']
+        )
+        
+        if session.payment_status != "paid":
+            return JSONResponse({
+                "status": "pending",
+                "message": "Payment is still processing",
+                "payment_status": session.payment_status
+            })
+        
+        # Obtener datos del cliente desde metadata
+        customer_name = session.metadata.get("customer_name", "Unknown")
+        customer_phone = session.metadata.get("customer_phone", "Unknown")
+        
+        # Recuperar el carrito del metadata
+        cart_json = session.metadata.get("cart_json", "[]")
+        cart_data = json.loads(cart_json)
+        
+        # Construir el carrito con información completa de los productos
+        cart_items = []
+        for item in cart_data:
+            product_id = item.get("product_id")
+            if not product_id:
+                continue
+                
+            # Buscar el producto en Qdrant
+            results = _client.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=rest.Filter(
+                    must=[
+                        rest.FieldCondition(
+                            key="product_id",
+                            match=rest.MatchValue(value=product_id)
+                        )
+                    ]
+                ),
+                limit=1
+            )
+            
+            if results[0]:
+                product = results[0][0].payload
+                
+                # Parsear colors y sizes si son strings
+                colors = product.get("colors") or []
+                if isinstance(colors, str):
+                    colors = [c.strip() for c in colors.split(";") if c.strip()]
+                
+                sizes = product.get("sizes") or []
+                if isinstance(sizes, str):
+                    sizes = [s.strip() for s in sizes.split(";") if s.strip()]
+                
+                cart_item = {
+                    "product_id": product_id,
+                    "title": product.get("title", "Unknown Product"),
+                    "brand": product.get("brand"),
+                    "category": product.get("category"),
+                    "price": float(product.get("price", 0)),
+                    "quantity": item.get("quantity", 1),
+                    "color": item.get("color") or (colors[0] if colors else None),
+                    "size": item.get("size") or (sizes[0] if sizes else None),
+                    "image_url": product.get("image_url")
+                }
+                cart_items.append(cart_item)
+        
+        # Crear el objeto de orden completo
+        order_data = {
+            "order_id": f"ORD-{session_id[:8].upper()}",
+            "session_id": session_id,
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "cart": cart_items,
+            "amount_total": session.amount_total / 100,
+            "currency": session.currency.upper(),
+            "status": "completed",
+            "payment_status": session.payment_status,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        # Guardar en archivo JSON (puedes cambiar esto a tu DB)
+        orders_dir = Path(__file__).parent / "orders"
+        orders_dir.mkdir(exist_ok=True)
+        order_file = orders_dir / f"{order_data['order_id']}.json"
+        
+        with open(order_file, "w", encoding="utf-8") as f:
+            json.dump(order_data, f, indent=2, ensure_ascii=False)
+        
+        print(f"✅ Order saved: {order_data['order_id']}")
+        print(f"   Customer: {customer_name} ({customer_phone})")
+        print(f"   Items: {len(cart_items)}")
+        print(f"   Total: ${order_data['amount_total']:.2f} {order_data['currency']}")
+        
+        return JSONResponse({
+            "status": "success",
+            "message": "Payment completed successfully",
+            "order": order_data
+        })
+            
+    except stripe.error.StripeError as e:
+        raise HTTPException(status_code=400, detail=f"Stripe error: {str(e)}")
+    except Exception as e:
+        print(f"❌ Error processing order: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+
+# ============= END STRIPE ROUTES =============
+
+
 @app.post("/whatsapp", response_model=ConversationalResponse)
 async def whatsapp_agent(request: Request) -> ConversationalResponse:
     """
@@ -170,38 +400,3 @@ async def whatsapp_agent(request: Request) -> ConversationalResponse:
         return result
     else:
         return HTTPException(status_code=500, detail=result.get("message", "Error procesando webhook"))
-        
-    
-    
-    
-    # 1. Process the query using the shared ask_agent logic
-    ask_req = AskRequest(query=request.query)
-    agent_response = ask_agent_logic(ask_req)
-    
-    # 2. Send the response via Kapso
-    try:
-        # Initialize Kapso client
-        with KapsoClient() as kapso:
-            # Send the conversational text response
-            kapso.send_message(
-                conversation_id=request.conversation_id,
-                message=agent_response.response
-            )
-            
-            # Send product details if available
-            if agent_response.items:
-                products_text = "Here are the products I found:\n\n"
-                for item in agent_response.items[:3]: # Limit to top 3
-                    products_text += f"*{item.title}*\n"
-                    products_text += f"Price: ${item.price}\n"
-                    products_text += f"Why: {item.why}\n\n"
-                
-                kapso.send_message(
-                    conversation_id=request.conversation_id,
-                    message=products_text
-                )
-                
-    except Exception as e:
-        # We log the error but still return the response to the caller
-    
-    return agent_response
