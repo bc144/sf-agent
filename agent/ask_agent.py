@@ -3,15 +3,13 @@ import os
 from typing import List, Optional
 
 from openai import OpenAI
-from api.qdrant_client import QdrantClient
-from api.qdrant_client.http import models as rest
-from api.sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient  # ✅ Import correcto
+from qdrant_client.http import models as rest  # ✅ Import correcto
+from sentence_transformers import SentenceTransformer  # ✅ Import correcto
 from .prompt import SYSTEM_PROMPT
-
 
 from api.models import AskRequest, Constraints, ConversationalResponse, ProductCard
 from api.qdrant_setup import COLLECTION_NAME, VECTOR_NAME, ensure_collection
-
 
 
 _model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
@@ -204,4 +202,3 @@ def ask_agent_logic(request: AskRequest) -> ConversationalResponse:
             response="Here are some products I found for you!",
             items=items
         )
-

@@ -1,5 +1,4 @@
-from typing import List, Optional
-
+from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 
 
@@ -49,6 +48,7 @@ class WhatsAppRequest(BaseModel):
     conversation_id: str
     phone_number: Optional[str] = None
 
+
 class CartItem(BaseModel):
     product_id: str
     title: str
@@ -60,11 +60,12 @@ class CartItem(BaseModel):
     size: Optional[str] = None
     image_url: Optional[str] = None
 
-# Agregar este modelo en models.py o al inicio
+
 class CheckoutRequest(BaseModel):
     cart: List[Dict[str, Any]]
-    customer_name: str  # Nombre de WhatsApp
-    customer_phone: str  # Número de teléfono
+    customer_name: str
+    customer_phone: str
+
 
 class Order(BaseModel):
     order_id: str
@@ -77,3 +78,18 @@ class Order(BaseModel):
     status: str
     payment_status: str
     created_at: str
+
+
+# Modelos para el sistema de conversación de Kapso
+class ConversationMessage(BaseModel):
+    role: str  # "user" o "assistant"
+    content: str
+    timestamp: Optional[str] = None
+
+
+class Context(BaseModel):
+    conversation_id: str
+    phone_number: Optional[str] = None
+    history: List[ConversationMessage] = Field(default_factory=list)
+    current_constraints: Optional[Constraints] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
